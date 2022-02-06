@@ -109,7 +109,9 @@ pub fn run() -> sc_cli::Result<()> {
 					.into())
 			},
 		None => {
-			let runner = cli.create_runner(&cli.run)?;
+			let mut runner = cli.create_runner(&cli.run)?;
+			let config = runner.config_mut();
+			config.offchain_worker.indexing_enabled = true;
 			runner.run_node_until_exit(|config| async move {
 				service::new_full(config).map_err(sc_cli::Error::Service)
 			})
