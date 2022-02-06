@@ -1,8 +1,12 @@
+use sp_std::borrow::Borrow;
 use sp_std::cell::{Ref, RefCell};
 use sp_std::fmt::{Display, Formatter};
-use sp_std::hash::{Hash, Hasher};
+use sp_std::hash::{Hash};
 use sp_std::rc::Rc;
 use sp_std::str::*;
+use sp_core::hashing::twox_64;
+use sp_std::vec::Vec;
+
 
 pub struct MerkleTree {
     tree_root: TreeNodeType,
@@ -17,7 +21,7 @@ pub struct TreeNode {
     // 哈希值
     pub hash: Vec<u8>,
     // 交易序号
-    pub trade_no: Box<usize>,
+    pub trade_no: usize,
     // 验证路径
     pub left: Option<TreeNodeType>,
     pub right: Option<TreeNodeType>,
@@ -25,6 +29,7 @@ pub struct TreeNode {
     pub is_left: bool,
 }
 
+#[cfg(feature = "std")]
 impl Display for TreeNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> sp_std::fmt::Result {
         let mut left_hash = vec![];
@@ -41,17 +46,17 @@ impl Display for TreeNode {
             parent_hash = TreeNode::unwrap(parent).hash.clone();
         }
         write!(f, "trade_no: {}, value: {}, isLeft: {}
-        hash: {},
-        left: {},
-        right: {},
-        parent: {}\n",
+        hash: {:?},
+        left: {:?},
+        right: {:?},
+        parent: {:?}\n",
                self.trade_no,
-               from_utf8(&*self.value).unwrap(),
+               std::str::from_utf8(&*self.value).unwrap(),
                self.is_left,
-               from_utf8(&*self.hash).unwrap(),
-               from_utf8(&*left_hash).unwrap(),
-               from_utf8(&*right_hash).unwrap(),
-               from_utf8(&*parent_hash).unwrap(),
+               self.hash,
+               left_hash,
+               right_hash,
+               parent_hash
         )
     }
 }
@@ -62,11 +67,9 @@ impl TreeNode {
         let mut data_vec = vec![];
         let mut tree_leaf = vec![];
         for (i, val) in data.iter().enumerate() {
-            let mut hasher = DefaultHasher::new();
-            val.hash(&mut hasher);
             let tree_data =
                 Rc::new(RefCell::new(Self::new_data_node(String::from(val).into_bytes(),
-                                                         hasher.finish().to_string().into_bytes(),
+                                                         twox_64(val.as_ref()).to_vec(),
                                                          Box::new(i + 1))),
                 );
             data_vec.push(Rc::clone(&tree_data));
@@ -114,22 +117,33 @@ impl TreeNode {
     // 两节点组合为一个
     fn combine_node(left: TreeNodeType, right: TreeNodeType) -> TreeNodeType {
         let parent;
+        let left_index;
+        let right_index;
         {
             let left_ref = Self::unwrap(&left);
             let right_ref = Self::unwrap(&right);
-            let left_val = from_utf8(&*left_ref.hash).unwrap();
-            let right_val = from_utf8(&*right_ref.hash).unwrap();
-            let mut hasher = DefaultHasher::new();
-            (left_val.to_owned() + right_val).hash(&mut hasher);
-            let hash_vec: Vec<u8> = hasher.finish().to_string().into_bytes();
+            let mut to_hash = vec![];
+            to_hash.append(&mut left_ref.hash.clone());
+            to_hash.append(&mut right_ref.hash.clone());
+            let hashed = twox_64(&*to_hash);
+            let hash_vec: Vec<u8> = hashed.to_vec();
+            left_index = left_ref.trade_no.clone();
+            right_index = right_ref.trade_no.clone();
             let index = (left_ref.trade_no.to_string().to_owned() + &*right_ref.trade_no.to_string())
                 .parse::<usize>().unwrap();
             parent = Rc::new(RefCell::new(Self::new_tree_node(hash_vec, Box::new(index),
                                                               Some(Rc::clone(&left)),
                                                               Some(Rc::clone(&right)))));
         }
+        if *left_index % 2 == 0 {
+            (*left).borrow_mut().trade_no = Box::new(*left_index - 1);
+        }
         (*left).borrow_mut().parent = Some(Rc::clone(&parent));
         (*left).borrow_mut().is_left = true;
+
+        if *right_index % 2 != 0 {
+            (*right).borrow_mut().trade_no = Box::new(*right_index + 1);
+        }
         (*right).borrow_mut().parent = Some(Rc::clone(&parent));
         (*right).borrow_mut().is_left = false;
         parent
@@ -186,18 +200,20 @@ impl MerkleTree {
     /// * `data` - 待验证原始数据
     /// * `path` - 默克尔路径 `vec![hash1, hash2]`
     /// * `root_hash` - 根hash
-    pub fn verify_data(data: &str, path: &Vec<Vec<u8>>, root_hash: &Vec<u8>) -> bool {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        let mut data_hash = hasher.finish().to_string();
-        for path_hash in path {
-            let to_hash = data_hash.to_owned() + from_utf8(&*path_hash).unwrap();
-            let mut hasher = DefaultHasher::new();
-            to_hash.hash(&mut hasher);
-            data_hash = hasher.finish().to_string();
-            println!("verify_data: {}", data_hash);
+    pub fn verify_data(data: &str, path: &Vec<(usize, Vec<u8>)>, root_hash: &Vec<u8>) -> bool {
+        let mut data_hash = twox_64(data.as_ref()).to_vec();
+        for (trade_no, path_hash) in path {
+            if trade_no % 2 == 0 {
+                data_hash.append(&mut path_hash.clone());
+                data_hash = Vec::from(twox_64(&*data_hash));
+            } else {
+                let mut path_hash = path_hash.clone();
+                path_hash.append(&mut data_hash.clone());
+                data_hash = Vec::from(twox_64(&*path_hash));
+            }
+            println!("verify_data: {:?}", data_hash);
         }
-        &data_hash.into_bytes() == root_hash
+        &data_hash == root_hash
     }
 
     /// 向上递归, 找兄弟节点
@@ -235,11 +251,11 @@ fn test() {
     // println!("{}", (*v.tree_leaf).borrow().len());
     let path = v.merkle_path(1);
     for x in &path {
-        println!("merkle_path: {}: {}", x.0, from_utf8(&x.1).unwrap());
+        println!("merkle_path: {}: {:?}", x.0, &x.1);
     }
-    let path: Vec<Vec<u8>> = path.into_iter().map(
-        |v| v.1
-    ).collect::<Vec<Vec<u8>>>();
+    // let path: Vec<Vec<u8>> = path.into_iter().map(
+    //     |v| v.1
+    // ).collect::<Vec<Vec<u8>>>();
     let result = MerkleTree::verify_data("21", &path,
                                          &TreeNode::unwrap(&v.tree_root).hash);
     println!("result: {}", result);
