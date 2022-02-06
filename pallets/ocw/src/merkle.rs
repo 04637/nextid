@@ -1,9 +1,8 @@
-use std::cell::{Ref, RefCell};
-use std::collections::hash_map::DefaultHasher;
-use std::fmt::{Display, Formatter};
-use std::hash::{Hash, Hasher};
-use std::rc::Rc;
-use std::str::*;
+use sp_std::cell::{Ref, RefCell};
+use sp_std::fmt::{Display, Formatter};
+use sp_std::hash::{Hash, Hasher};
+use sp_std::rc::Rc;
+use sp_std::str::*;
 
 pub struct MerkleTree {
     tree_root: TreeNodeType,
@@ -27,7 +26,7 @@ pub struct TreeNode {
 }
 
 impl Display for TreeNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> sp_std::fmt::Result {
         let mut left_hash = vec![];
         let mut right_hash = vec![];
         let mut parent_hash = vec![];

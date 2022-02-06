@@ -282,17 +282,11 @@ impl pallet_sudo::Config for Runtime {
 // For pallet-ocw
 // ocw-mod
 parameter_types! {
-	pub const GracePeriod: BlockNumber = 3;
-	pub const UnsignedInterval: BlockNumber = 3;
-	pub const UnsignedPriority: BlockNumber = 3;
 }
 impl pallet_ocw::Config for Runtime {
 	type AuthorityId = pallet_ocw::crypto::TestAuthId;
 	type Event = Event;
 	type Call = Call;
-	type GracePeriod = GracePeriod;
-	type UnsignedInterval = UnsignedInterval;
-	type UnsignedPriority = UnsignedPriority;
 }
 
 impl<LocalCall> frame_system::offchain::CreateSignedTransaction<LocalCall> for Runtime
