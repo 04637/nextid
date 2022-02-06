@@ -106,11 +106,10 @@ pub mod pallet {
         fn offchain_worker(block_number: T::BlockNumber) {
             log::info!("=================== OCW ====================");
             let key = Self::derived_key(block_number);
-            let key = b"123".to_vec();
             log::info!("get key: {:#?}", &key);
             let storage_ref = StorageValueRef::persistent(&key);
             // storage_ref.set(&IndexingData(b"submit_number_unsigned".to_vec(), 7777));
-            let r = storage_ref.get::<i32>();
+            let r = storage_ref.get::<IndexingData>();
             log::info!("r: {:#?}", &r);
 
             // if let Ok(Some(data)) = r {
@@ -145,13 +144,11 @@ pub mod pallet {
 				Self::v8_str(&id_number), Self::v8_str(&name), Self::v8_str(&phone));
             let who = ensure_signed(origin)?;
             log::info!("who: {:#?}", &who);
-            let block_number: T::BlockNumber = frame_system::Module::<T>::block_number();
+            let block_number: T::BlockNumber = frame_system::Pallet::<T>::block_number();
             let key = Self::derived_key(block_number);
-            let key = b"123".to_vec();
             log::info!("set key: {:#?}", &key);
-            let data = 666;
-            let q = offchain_index::set(&key, &data.encode());
-            log::info!("q: {:#?}", q);
+            let data = IndexingData(b"submit_number_unsigned".to_vec(), 66);
+            offchain_index::set(&key, &data.encode());
             Ok(())
         }
     }
