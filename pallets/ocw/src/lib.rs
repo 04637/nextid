@@ -1,5 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-mod merkle;
+
+mod sp_merkle;
+
 use codec::{Decode, Encode};
 use frame_system::{
     self as system,
@@ -27,6 +29,8 @@ use sp_std::vec::Vec;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use sp_std::collections::{btree_map::BTreeMap, vec_deque::VecDeque};
+use sp_io::hashing::twox_64;
+
 
 /// Defines application identifier for crypto keys of this module.
 ///
@@ -70,11 +74,13 @@ pub mod crypto {
 }
 
 pub use pallet::*;
+use crate::sp_merkle::MerkleTree;
 
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
     use frame_support::pallet_prelude::*;
+    use frame_support::sp_core_hashing_proc_macro::twox_64;
     use frame_support::StorageHasher;
     use frame_system::pallet_prelude::*;
     use sp_core::crypto::AccountId32;
@@ -106,7 +112,9 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn offchain_worker(block_number: T::BlockNumber) {
             log::info!("=================== OCW ====================");
+            log::info!("=================== OCW VALIDATE BLOCK ====================");
             let keys = <BlockKeys<T>>::get(block_number);
+            // Self::append_key(block_number, Vec::new());
             log::info!("\nget: {:?}, {:?}\n", block_number, keys);
             if keys.is_empty() {
                 // 如果没有录入, 结束
@@ -118,9 +126,21 @@ pub mod pallet {
                     log::info!("local storage data: {:?}", data);
                     let owner =
                         T::AccountId::decode(&mut &*data.owner).unwrap();
+                    let id_no = data.id_number.clone();
                     let res =
                         Self::validate_info(&data.id_number, &data.name, &data.phone);
-                    log::info!("validate: {} id: {}", res.unwrap(), Self::v8_str(&data.id_number));
+                    if let Ok(state) = res {
+                        log::info!("validate: {} id: {:?}", state, &data.id_number);
+                        if state == 1 {
+                            // 验证通过
+                            let tree = Self::build_age_merkle(&id_no[6..10]);
+                            let to_validate = twox_64("2004:1".as_ref()).to_vec();
+                            let path = tree.merkle_path(&to_validate);
+                            let result = MerkleTree::verify_data(&to_validate, &path,
+                                                                 &tree.root_hash);
+                            log::info!("result: {}", result);
+                        }
+                    }
                 }
             }
         }
@@ -141,7 +161,6 @@ pub mod pallet {
     /// A public part of the pallet.
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        // register-mod
         #[pallet::weight(1_000)]
         pub fn submit_info(origin: OriginFor<T>,
                            id_number: Vec<u8>, name: Vec<u8>, phone: Vec<u8>) -> DispatchResult {
@@ -162,6 +181,16 @@ pub mod pallet {
             Self::deposit_event(SubmitInfo { who });
             Ok(())
         }
+
+        #[pallet::weight(1_0000)]
+        pub fn grant_id(origin: OriginFor<T>, id_tree: Vec<u8>, owner: T::AccountId) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            todo!("verify who");
+            <IdsOwned<T>>::mutate(&owner, |id_merkle| {
+                <IdsOwned<T>>::insert(owner.clone(), id_tree);
+            });
+            Ok(())
+        }
     }
 
     /// Events for the pallet.
@@ -174,7 +203,7 @@ pub mod pallet {
     /// register-mod
     #[pallet::storage]
     #[pallet::getter(fn ids_owned)]
-    /// Keeps track of what accounts own what id.
+    /// Keeps track of what accounts own what age merkle.
     pub(super) type IdsOwned<T: Config> = StorageMap<
         _,
         Twox128,
@@ -197,6 +226,40 @@ pub mod pallet {
 
 
 impl<T: Config> Pallet<T> {
+    /// 验证某块中所有用户数据
+    fn ocw_validate_block(block_number: T::BlockNumber) {
+        // log::info!("=================== OCW VALIDATE BLOCK ====================");
+        // let keys = <BlockKeys<T>>::get(block_number);
+        // // Self::append_key(block_number, Vec::new());
+        // log::info!("\nget: {:?}, {:?}\n", block_number, keys);
+        // if keys.is_empty() {
+        //     // 如果没有录入, 结束
+        //     return;
+        // }
+        // for key in keys {
+        //     let storage_ref = StorageValueRef::persistent(&key);
+        //     if let Ok(Some(data)) = storage_ref.get::<PersonInfoOcw>() {
+        //         log::info!("local storage data: {:?}", data);
+        //         let owner =
+        //             T::AccountId::decode(&mut &*data.owner).unwrap();
+        //         let id_no = data.id_number.clone();
+        //         let res =
+        //             Self::validate_info(&data.id_number, &data.name, &data.phone);
+        //         if let Ok(state) = res {
+        //             log::info!("validate: {} id: {:?}", state, &data.id_number);
+        //             if state == 1 {
+        //                 // 验证通过
+        //                 let tree = Self::build_age_merkle(&id_no[6..10]);
+        //                 let to_validate = twox_64("2004:1".as_ref()).to_vec();
+        //                 let path = tree.merkle_path(&to_validate);
+        //                 let result = MerkleTree::verify_data(&to_validate, &path,
+        //                                                      &MerkleTree::unwrap(&tree.tree_root).hash);
+        //                 log::info!("result: {}", result);
+        //             }
+        //         }
+        //     }
+        // }
+    }
     /// 验证三要素匹配
     fn validate_info(id_number: &Vec<u8>, name: &Vec<u8>, phone: &Vec<u8>) -> Result<i32, http::Error> {
         let deadline = sp_io::offchain::timestamp().add(Duration::from_millis(2_000));
@@ -236,6 +299,36 @@ impl<T: Config> Pallet<T> {
         };
     }
 
+    fn build_age_merkle(birth: &[u8]) -> MerkleTree {
+        let mut data = Vec::new();
+        // 构建范围数据，前后一百年 1900-2100
+        for year in 1900..=2100 {
+            let to_add_data = Self::format_u8_data(birth, year);
+            data.push(twox_64(to_add_data.as_ref()).to_vec());
+        }
+        MerkleTree::build(&data)
+    }
+
+    /// 四位数字转为Vec<u8>
+    fn format_u8_data(birth: &[u8], year: u32) -> Vec<u8> {
+        // year 转 u8
+        let mut year_u8 = Vec::new();
+        year_u8.push((year / 1000 + 48) as u8);
+        year_u8.push(((year % 1000) / 100 + 48) as u8);
+        year_u8.push(((year % 100) / 10 + 48) as u8);
+        year_u8.push(((year % 10) / 1 + 48) as u8);
+        // 组装格式 year:birthed
+        let mut data: Vec<u8> = Vec::new();
+        data.append(&mut year_u8.clone());
+        data.push(58);
+        if year_u8 >= birth.to_vec() {
+            data.push(49);
+        } else {
+            data.push(48);
+        }
+        data
+    }
+
     fn append_key(block_number: T::BlockNumber, key: Vec<u8>) {
         <BlockKeys<T>>::mutate(block_number, |keys| {
             keys.push_back(key);
@@ -243,7 +336,6 @@ impl<T: Config> Pallet<T> {
         });
     }
 
-    // register-mod
     fn parse_state(resp_str: &str) -> Value {
         let mut json_data: Value = serde_json::from_str(resp_str).unwrap();
         json_data["data"]["state"].take()
