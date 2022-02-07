@@ -1,5 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-
+mod merkle;
 use codec::{Decode, Encode};
 use frame_system::{
     self as system,
@@ -26,7 +26,7 @@ use sp_runtime::offchain::http::{Method, Request};
 use sp_std::vec::Vec;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-
+use sp_std::collections::{btree_map::BTreeMap, vec_deque::VecDeque};
 
 /// Defines application identifier for crypto keys of this module.
 ///
@@ -81,6 +81,7 @@ pub mod pallet {
     use sp_io::hashing::blake2_128;
     use sp_runtime::traits::{IdentifyAccount, Verify};
     use crate::crypto::Signature;
+    use crate::Event::SubmitInfo;
 
     /// This pallet's configuration trait
     #[pallet::config]
@@ -105,18 +106,23 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn offchain_worker(block_number: T::BlockNumber) {
             log::info!("=================== OCW ====================");
-            let key = Self::derived_key(block_number);
-            log::info!("get key: {:#?}", &key);
-            let storage_ref = StorageValueRef::persistent(&key);
-            // storage_ref.set(&IndexingData(b"submit_number_unsigned".to_vec(), 7777));
-            let r = storage_ref.get::<IndexingData>();
-            log::info!("r: {:#?}", &r);
-
-            // if let Ok(Some(data)) = r {
-            //     log::info!("local storage data: {:?}", data);
-            // } else {
-            //     log::info!("Error reading from local storage.");
-            // }
+            let keys = <BlockKeys<T>>::get(block_number);
+            log::info!("\nget: {:?}, {:?}\n", block_number, keys);
+            if keys.is_empty() {
+                // 如果没有录入, 结束
+                return;
+            }
+            for key in keys {
+                let storage_ref = StorageValueRef::persistent(&key);
+                if let Ok(Some(data)) = storage_ref.get::<PersonInfoOcw>() {
+                    log::info!("local storage data: {:?}", data);
+                    let owner =
+                        T::AccountId::decode(&mut &*data.owner).unwrap();
+                    let res =
+                        Self::validate_info(&data.id_number, &data.name, &data.phone);
+                    log::info!("validate: {} id: {}", res.unwrap(), Self::v8_str(&data.id_number));
+                }
+            }
         }
     }
 
@@ -128,10 +134,9 @@ pub mod pallet {
         name: Vec<u8>,
         // 电话号码
         phone: Vec<u8>,
+        // 持有人
+        owner: Vec<u8>,
     }
-
-    #[derive(Debug, Deserialize, Encode, Decode, Default)]
-    struct IndexingData(Vec<u8>, u64);
 
     /// A public part of the pallet.
     #[pallet::call]
@@ -145,10 +150,16 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             log::info!("who: {:#?}", &who);
             let block_number: T::BlockNumber = frame_system::Pallet::<T>::block_number();
-            let key = Self::derived_key(block_number);
-            log::info!("set key: {:#?}", &key);
-            let data = IndexingData(b"submit_number_unsigned".to_vec(), 66);
+            let key = Self::derived_key(block_number, who.clone());
+            let data = PersonInfoOcw {
+                id_number,
+                name,
+                phone,
+                owner: who.encode(),
+            };
+            Self::append_key(block_number, key.clone());
             offchain_index::set(&key, &data.encode());
+            Self::deposit_event(SubmitInfo { who });
             Ok(())
         }
     }
@@ -157,32 +168,37 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub (super) fn deposit_event)]
     pub enum Event<T: Config> {
-        /// Event generated when new price is accepted to contribute to the average.
-        NewPrice { price: u32, who: T::AccountId },
+        SubmitInfo { who: T::AccountId }
     }
 
     /// register-mod
-    /// todo 看是否要切换为map,
     #[pallet::storage]
     #[pallet::getter(fn ids_owned)]
     /// Keeps track of what accounts own what id.
     pub(super) type IdsOwned<T: Config> = StorageMap<
         _,
-        Twox64Concat,
+        Twox128,
         T::AccountId,
         Vec<u8>,
-        ValueQuery,
+        OptionQuery,
     >;
 
     #[pallet::storage]
-    #[pallet::getter(fn persons)]
-    pub(super) type PersonInfo<T: Config> = StorageValue<_, Vec<u8>, OptionQuery>;
+    #[pallet::getter(fn block_keys)]
+    // key: 块, val: 当前块生成的key
+    pub(super) type BlockKeys<T: Config> = StorageMap<
+        _,
+        Twox64Concat,
+        T::BlockNumber,
+        VecDeque<Vec<u8>>,
+        ValueQuery
+    >;
 }
 
 
 impl<T: Config> Pallet<T> {
     /// 验证三要素匹配
-    fn validate_info(id_number: &Vec<u8>, name: &Vec<u8>, phone: &Vec<u8>) -> Result<u32, http::Error> {
+    fn validate_info(id_number: &Vec<u8>, name: &Vec<u8>, phone: &Vec<u8>) -> Result<i32, http::Error> {
         let deadline = sp_io::offchain::timestamp().add(Duration::from_millis(2_000));
         let mut params = Vec::new();
         params.push("idcard=".as_bytes());
@@ -210,13 +226,21 @@ impl<T: Config> Pallet<T> {
             log::warn!("No UTF8 body");
             http::Error::Unknown
         })?;
-        let state = Self::parse_state(body_str);
-        if let Some(sate) = state.as_str() {
+        let state_val = Self::parse_state(body_str);
+        return if let Some(state) = state_val.as_str() {
             log::info!("{}", state);
+            Ok(str::parse::<i32>(state).unwrap())
         } else {
             log::error!("api error");
-        }
-        Ok(1)
+            Ok(-1)
+        };
+    }
+
+    fn append_key(block_number: T::BlockNumber, key: Vec<u8>) {
+        <BlockKeys<T>>::mutate(block_number, |keys| {
+            keys.push_back(key);
+            log::info!("\nBlock keys: {:?}, block_number: {:?}\n", keys, block_number);
+        });
     }
 
     // register-mod
@@ -227,11 +251,14 @@ impl<T: Config> Pallet<T> {
     fn v8_str(vec: &Vec<u8>) -> &str {
         sp_std::str::from_utf8(vec).unwrap()
     }
-    fn derived_key(block_number: T::BlockNumber) -> Vec<u8> {
+
+    fn derived_key(block_number: T::BlockNumber, account_id: T::AccountId) -> Vec<u8> {
         block_number.using_encoded(|encoded_bn| {
             ONCHAIN_TX_KEY.clone().into_iter()
                 .chain(b"/".into_iter())
                 .chain(encoded_bn)
+                .chain(b"/".into_iter())
+                .chain(account_id.encode().as_slice().into_iter())
                 .copied()
                 .collect::<Vec<u8>>()
         })
