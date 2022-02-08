@@ -1,10 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use sp_std::borrow::Borrow;
-use sp_std::cell::{Ref, RefCell};
 use sp_std::fmt::{Display, Formatter};
-use sp_std::hash::{Hash};
-use sp_std::rc::Rc;
 use sp_std::vec::Vec;
 use sp_io::hashing::twox_64;
 use sp_std::collections::btree_map::BTreeMap;
@@ -136,7 +132,7 @@ impl MerkleTree {
     /// * `data` - 待验证原始数据
     /// * `path` - 默克尔路径 `vec![hash1, hash2]`
     /// * `root_hash` - 根hash
-    pub fn verify_data(data_hash: &Vec<u8>, path: &Vec<(Vec<u8>, bool)>, root_hash: &Vec<u8>) -> bool {
+    pub fn check_data(data_hash: &Vec<u8>, path: &Vec<(Vec<u8>, bool)>, root_hash: &Vec<u8>) -> bool {
         let mut data_hash = data_hash.clone();
         for (path_hash, is_left) in path {
             if !is_left {
@@ -192,16 +188,6 @@ impl MerkleTree {
         None
     }
 
-    // 设置左节点
-    fn set_left(&mut self, hash: &Vec<u8>, left_hash: &Vec<u8>) {
-        let node = self.get_node(hash);
-        if let Some(node) = node {
-            let mut node = node.clone();
-            node.left = left_hash.clone();
-            self.nodes.insert(hash.clone(), node);
-        }
-    }
-
     // 获取对应hash的右节点
     fn right(&self, hash: &Vec<u8>) -> Option<TreeNode> {
         let node = self.get_node(hash);
@@ -209,16 +195,6 @@ impl MerkleTree {
             return self.get_node(&node.right);
         }
         None
-    }
-
-    // 设置右节点
-    fn set_right(&mut self, hash: &Vec<u8>, right_hash: &Vec<u8>) {
-        let node = self.get_node(hash);
-        if let Some(node) = node {
-            let mut node = node.clone();
-            node.right = right_hash.clone();
-            self.nodes.insert(hash.clone(), node);
-        }
     }
 
     // 获取对应hash的父节点
@@ -294,8 +270,8 @@ fn test() {
     for x in &path {
         // println!("merkle_path: {:?}: {}", x.0, &x.1);
     }
-    let result = MerkleTree::verify_data(&data_hash, &path,
-                                         &merkle.root_hash);
+    let result = MerkleTree::check_data(&data_hash, &path,
+                                        &merkle.root_hash);
     // println!("result: {}", result);
 }
 
@@ -323,8 +299,8 @@ fn test_build_age() {
     for x in &path {
         // println!("merkle_path: {:?}: {}", x.0, &x.1);
     }
-    let result = MerkleTree::verify_data(&to_validate_data_hash, &path,
-                                         &v.root_hash);
+    let result = MerkleTree::check_data(&to_validate_data_hash, &path,
+                                        &v.root_hash);
     // println!("result: {}", result);
 }
 

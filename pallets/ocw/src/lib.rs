@@ -4,31 +4,24 @@ mod sp_merkle;
 
 use codec::{Decode, Encode};
 use frame_system::{
-    self as system,
     ensure_signed,
+    ensure_root,
     offchain::{
-        AppCrypto, CreateSignedTransaction, SendSignedTransaction, SendUnsignedTransaction,
-        SignedPayload, Signer, SigningTypes, SubmitTransaction,
+        AppCrypto, CreateSignedTransaction, SendSignedTransaction, Signer,
     },
 };
-use lite_json::json::JsonValue;
 use sp_core::crypto::KeyTypeId;
 use sp_runtime::{
     offchain::{
         http,
-        storage::{MutateStorageError, StorageRetrievalError, StorageValueRef},
+        storage::{StorageValueRef},
         Duration,
     },
-    traits::Zero,
-    transaction_validity::{InvalidTransaction, TransactionValidity, ValidTransaction},
-    RuntimeDebug,
 };
 use sp_io::offchain_index;
-use sp_runtime::offchain::http::{Method, Request};
 use sp_std::vec::Vec;
-use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use sp_std::collections::{btree_map::BTreeMap, vec_deque::VecDeque};
+use sp_std::collections::{vec_deque::VecDeque};
 use sp_io::hashing::twox_64;
 
 
@@ -80,14 +73,9 @@ use crate::sp_merkle::MerkleTree;
 pub mod pallet {
     use super::*;
     use frame_support::pallet_prelude::*;
-    use frame_support::sp_core_hashing_proc_macro::twox_64;
-    use frame_support::StorageHasher;
     use frame_system::pallet_prelude::*;
-    use sp_core::crypto::AccountId32;
-    use sp_io::hashing::blake2_128;
-    use sp_runtime::traits::{IdentifyAccount, Verify};
-    use crate::crypto::Signature;
-    use crate::Event::SubmitInfo;
+    use sp_runtime::traits::{BadOrigin};
+    use crate::Event::*;
 
     /// This pallet's configuration trait
     #[pallet::config]
@@ -111,56 +99,16 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn offchain_worker(block_number: T::BlockNumber) {
-            log::info!("=================== OCW ====================");
             log::info!("=================== OCW VALIDATE BLOCK ====================");
-            let keys = <BlockKeys<T>>::get(block_number);
-            // Self::append_key(block_number, Vec::new());
-            log::info!("\nget: {:?}, {:?}\n", block_number, keys);
-            if keys.is_empty() {
-                // 如果没有录入, 结束
-                return;
-            }
-            for key in keys {
-                let storage_ref = StorageValueRef::persistent(&key);
-                if let Ok(Some(data)) = storage_ref.get::<PersonInfoOcw>() {
-                    log::info!("local storage data: {:?}", data);
-                    let owner =
-                        T::AccountId::decode(&mut &*data.owner).unwrap();
-                    let id_no = data.id_number.clone();
-                    let res =
-                        Self::validate_info(&data.id_number, &data.name, &data.phone);
-                    if let Ok(state) = res {
-                        log::info!("validate: {} id: {:?}", state, &data.id_number);
-                        if state == 1 {
-                            // 验证通过
-                            let tree = Self::build_age_merkle(&id_no[6..10]);
-                            let to_validate = twox_64("2004:1".as_ref()).to_vec();
-                            let path = tree.merkle_path(&to_validate);
-                            let result = MerkleTree::verify_data(&to_validate, &path,
-                                                                 &tree.root_hash);
-                            log::info!("result: {}", result);
-                        }
-                    }
-                }
-            }
+            // 验证块中信息
+            Self::ocw_validate_block(&block_number);
         }
-    }
-
-    #[derive(Debug, Encode, Decode)]
-    struct PersonInfoOcw {
-        // 身份证号
-        id_number: Vec<u8>,
-        // 姓名
-        name: Vec<u8>,
-        // 电话号码
-        phone: Vec<u8>,
-        // 持有人
-        owner: Vec<u8>,
     }
 
     /// A public part of the pallet.
     #[pallet::call]
     impl<T: Config> Pallet<T> {
+        /// # 提交身份信息
         #[pallet::weight(1_000)]
         pub fn submit_info(origin: OriginFor<T>,
                            id_number: Vec<u8>, name: Vec<u8>, phone: Vec<u8>) -> DispatchResult {
@@ -182,14 +130,53 @@ pub mod pallet {
             Ok(())
         }
 
-        #[pallet::weight(1_0000)]
-        pub fn grant_id(origin: OriginFor<T>, id_tree: Vec<u8>, owner: T::AccountId) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            todo!("verify who");
-            <IdsOwned<T>>::mutate(&owner, |id_merkle| {
-                <IdsOwned<T>>::insert(owner.clone(), id_tree);
-            });
+        /// # 颁发ID
+        /// 不可用ensure_root限制, https://stackoverflow.com/questions/63756597/is-it-possible-for-an-offchain-worker-to-submit-calls-to-an-extrinsic-with-ensur
+        /// call from ocw
+        #[pallet::weight(1_000_000_000)]
+        pub fn grant_id(_origin: OriginFor<T>, age_tree: Vec<u8>, owner: T::AccountId, password: Vec<u8>) -> DispatchResult {
+            ensure!(password == b"ocw".to_vec(), Error::<T>::OffchainSignedTxError);
+            // verify root
+            // `Sudo` pallet https://docs.substrate.io/rustdocs/master/pallet_sudo/index.html
+            // `Origin` type https://docs.substrate.io/v3/runtime/origins/
+            let block_number: T::BlockNumber = frame_system::Pallet::<T>::block_number();
+            <IdsOwned<T>>::insert(owner.clone(), age_tree);
+            log::info!("Verified!, owner: {:?}, block_number: {:?}", &owner, block_number);
+            Self::deposit_event(GrantId { who: owner });
             Ok(())
+        }
+
+        /// # root 添加可检查ID的账户
+        #[pallet::weight(0)]
+        pub fn auth_check_account(origin: OriginFor<T>, account: T::AccountId) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::add_check_account(account.clone());
+            Self::deposit_event(AuthAccount { who: account });
+            Ok(())
+        }
+
+        /// # 企业用户检查用户年龄
+        #[pallet::weight(1_000)]
+        pub fn limit_account_year(origin: OriginFor<T>, account: T::AccountId, mut year: Vec<u8>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            if Self::can_check_account(&who) {
+                let merkle_u8 = <IdsOwned<T>>::get(&account);
+                ensure!(merkle_u8!=None, Error::<T>::NotVerifiedAccount);
+                return if let Ok(merkle) = MerkleTree::decode(&mut &*merkle_u8.unwrap()) {
+                    let mut to_validate_data = Vec::new();
+                    to_validate_data.append(&mut year);
+                    to_validate_data.append(&mut b":1".to_vec());
+                    let to_validate = twox_64(&*to_validate_data).to_vec();
+                    let path = merkle.merkle_path(&to_validate);
+                    let result = MerkleTree::check_data(&to_validate, &path,
+                                                        &merkle.root_hash);
+                    ensure!(result, Error::<T>::NotSatisfiedLimit);
+                    Ok(())
+                } else {
+                    Err(DispatchError::from(BadOrigin))
+                };
+            }
+            Err(DispatchError::from(BadOrigin))
         }
     }
 
@@ -197,10 +184,26 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub (super) fn deposit_event)]
     pub enum Event<T: Config> {
-        SubmitInfo { who: T::AccountId }
+        SubmitInfo { who: T::AccountId },
+        GrantId { who: T::AccountId },
+        AuthAccount { who: T::AccountId },
+        CheckAccount { from_account: T::AccountId, to_account: T::AccountId },
     }
 
-    /// register-mod
+    #[pallet::error]
+    pub enum Error<T> {
+        // ocw签名失败
+        OffchainSignedTxError,
+        // 没有本地账户
+        NoLocalAcctForSigning,
+        // 账户还未实名
+        NotVerifiedAccount,
+        // 账户无权检查
+        CanNotCheckAccount,
+        // 验证无效
+        NotSatisfiedLimit,
+    }
+
     #[pallet::storage]
     #[pallet::getter(fn ids_owned)]
     /// Keeps track of what accounts own what age merkle.
@@ -222,137 +225,206 @@ pub mod pallet {
         VecDeque<Vec<u8>>,
         ValueQuery
     >;
-}
 
+    #[pallet::storage]
+    // 可以检查身份的账户
+    pub(super) type CanCheckAccounts<T: Config> = StorageValue<_, Vec<T::AccountId>, ValueQuery>;
 
-impl<T: Config> Pallet<T> {
-    /// 验证某块中所有用户数据
-    fn ocw_validate_block(block_number: T::BlockNumber) {
-        // log::info!("=================== OCW VALIDATE BLOCK ====================");
-        // let keys = <BlockKeys<T>>::get(block_number);
-        // // Self::append_key(block_number, Vec::new());
-        // log::info!("\nget: {:?}, {:?}\n", block_number, keys);
-        // if keys.is_empty() {
-        //     // 如果没有录入, 结束
-        //     return;
-        // }
-        // for key in keys {
-        //     let storage_ref = StorageValueRef::persistent(&key);
-        //     if let Ok(Some(data)) = storage_ref.get::<PersonInfoOcw>() {
-        //         log::info!("local storage data: {:?}", data);
-        //         let owner =
-        //             T::AccountId::decode(&mut &*data.owner).unwrap();
-        //         let id_no = data.id_number.clone();
-        //         let res =
-        //             Self::validate_info(&data.id_number, &data.name, &data.phone);
-        //         if let Ok(state) = res {
-        //             log::info!("validate: {} id: {:?}", state, &data.id_number);
-        //             if state == 1 {
-        //                 // 验证通过
-        //                 let tree = Self::build_age_merkle(&id_no[6..10]);
-        //                 let to_validate = twox_64("2004:1".as_ref()).to_vec();
-        //                 let path = tree.merkle_path(&to_validate);
-        //                 let result = MerkleTree::verify_data(&to_validate, &path,
-        //                                                      &MerkleTree::unwrap(&tree.tree_root).hash);
-        //                 log::info!("result: {}", result);
-        //             }
-        //         }
-        //     }
-        // }
+    #[derive(Debug, Encode, Decode)]
+    struct PersonInfoOcw {
+        // 身份证号
+        id_number: Vec<u8>,
+        // 姓名
+        name: Vec<u8>,
+        // 电话号码
+        phone: Vec<u8>,
+        // 持有人
+        owner: Vec<u8>,
     }
-    /// 验证三要素匹配
-    fn validate_info(id_number: &Vec<u8>, name: &Vec<u8>, phone: &Vec<u8>) -> Result<i32, http::Error> {
-        let deadline = sp_io::offchain::timestamp().add(Duration::from_millis(2_000));
-        let mut params = Vec::new();
-        params.push("idcard=".as_bytes());
-        params.push(&id_number);
-        params.push("&mobile=".as_bytes());
-        params.push(&phone);
-        params.push("&name=".as_bytes());
-        params.push(&name);
-        let request =
-            http::Request::post("http://sjsys.market.alicloudapi.com/communication/personal/1979",
-                                params);
-        let pending = request
-            .add_header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            .add_header("Authorization", "APPCODE ae1e3033a5de4969a3239250096c9cae")
-            .deadline(deadline).send().map_err(|_| http::Error::IoError)?;
 
-        let response = pending.try_wait(deadline).map_err(|_| http::Error::DeadlineReached)??;
-        if response.code != 200 {
-            log::warn!("Unexpected status code: {}", response.code);
+    impl<T: Config> Pallet<T> {
+        /// 验证某块中用户数据
+        fn ocw_validate_block(block_number: &T::BlockNumber) {
+            let keys = <BlockKeys<T>>::get(block_number);
+            log::info!("\nblock: {:?},\nkeys:{:?}\n", block_number, keys);
+            if keys.is_empty() {
+                // 如果没有录入, 结束
+                return;
+            }
+            for key in keys {
+                let storage_ref = StorageValueRef::persistent(&key);
+                if let Ok(Some(data)) = storage_ref.get::<PersonInfoOcw>() {
+                    log::debug!("cur_data: {:?}", data);
+                    let owner =
+                        T::AccountId::decode(&mut &*data.owner).unwrap();
+                    let id_no = data.id_number.clone();
+                    let res =
+                        Self::validate_info(&data.id_number, &data.name, &data.phone);
+                    if let Ok(state) = res {
+                        log::info!("validate: {} id: {}", state, Self::v8_str(&data.id_number));
+                        if state == 1 {
+                            // 验证通过
+                            let tree = Self::build_age_merkle(&id_no[6..10]);
+                            // 签名上链
+                            let _ = Self::ocw_signed_tx(tree.encode(), owner);
+                        } else {
+                            // 验证失败
+                        }
+                    }
+                }
+            }
         }
 
-        let body = response.body().collect::<Vec<u8>>();
-        log::info!("body: {}", Self::v8_str(&body));
-        let body_str = sp_std::str::from_utf8(&body).map_err(|_| {
-            log::warn!("No UTF8 body");
-            http::Error::Unknown
-        })?;
-        let state_val = Self::parse_state(body_str);
-        return if let Some(state) = state_val.as_str() {
-            log::info!("{}", state);
-            Ok(str::parse::<i32>(state).unwrap())
-        } else {
-            log::error!("api error");
-            Ok(-1)
-        };
-    }
-
-    fn build_age_merkle(birth: &[u8]) -> MerkleTree {
-        let mut data = Vec::new();
-        // 构建范围数据，前后一百年 1900-2100
-        for year in 1900..=2100 {
-            let to_add_data = Self::format_u8_data(birth, year);
-            data.push(twox_64(to_add_data.as_ref()).to_vec());
+        /// 添加可检查身份的账号
+        fn add_check_account(who: T::AccountId) {
+            if !Self::can_check_account(&who) {
+                log::info!("Adding account to checkAccounts: {:?}", &who);
+                <CanCheckAccounts<T>>::mutate(|accounts| {
+                    accounts.push(who);
+                });
+            }
         }
-        MerkleTree::build(&data)
-    }
 
-    /// 四位数字转为Vec<u8>
-    fn format_u8_data(birth: &[u8], year: u32) -> Vec<u8> {
-        // year 转 u8
-        let mut year_u8 = Vec::new();
-        year_u8.push((year / 1000 + 48) as u8);
-        year_u8.push(((year % 1000) / 100 + 48) as u8);
-        year_u8.push(((year % 100) / 10 + 48) as u8);
-        year_u8.push(((year % 10) / 1 + 48) as u8);
-        // 组装格式 year:birthed
-        let mut data: Vec<u8> = Vec::new();
-        data.append(&mut year_u8.clone());
-        data.push(58);
-        if year_u8 >= birth.to_vec() {
-            data.push(49);
-        } else {
-            data.push(48);
+        /// 检查账户有没有检查权限
+        fn can_check_account(who: &T::AccountId) -> bool {
+            <CanCheckAccounts<T>>::get().into_iter().
+                find(|a| a == who).is_some()
         }
-        data
-    }
 
-    fn append_key(block_number: T::BlockNumber, key: Vec<u8>) {
-        <BlockKeys<T>>::mutate(block_number, |keys| {
-            keys.push_back(key);
-            log::info!("\nBlock keys: {:?}, block_number: {:?}\n", keys, block_number);
-        });
-    }
 
-    fn parse_state(resp_str: &str) -> Value {
-        let mut json_data: Value = serde_json::from_str(resp_str).unwrap();
-        json_data["data"]["state"].take()
-    }
-    fn v8_str(vec: &Vec<u8>) -> &str {
-        sp_std::str::from_utf8(vec).unwrap()
-    }
+        fn ocw_signed_tx(age_tree: Vec<u8>, owner: T::AccountId) -> Result<(), Error<T>> {
+            // We retrieve a signer and check if it is valid.
+            //   Since this pallet only has one key in the keystore. We use `any_account()1 to
+            //   retrieve it. If there are multiple keys and we want to pinpoint it, `with_filter()` can be chained,
+            //   ref: https://substrate.dev/rustdocs/v3.0.0/frame_system/offchain/struct.Signer.html
+            let signer = Signer::<T, T::AuthorityId>::any_account();
+            // `result` is in the type of `Option<(Account<T>, Result<(), ()>)>`. It is:
+            //   - `None`: no account is available for sending transaction
+            //   - `Some((account, Ok(())))`: transaction is successfully sent
+            //   - `Some((account, Err(())))`: error occured when sending the transaction
+            let result = signer.send_signed_transaction(|_account|
+                //This means that the transaction, when executed, will simply call that
+                // function passing `price` as an argument.
+                Call::grant_id {
+                    age_tree: age_tree.clone(),
+                    owner: owner.clone(),
+                    password: b"ocw".to_vec(),
+                }
+            );
 
-    fn derived_key(block_number: T::BlockNumber, account_id: T::AccountId) -> Vec<u8> {
-        block_number.using_encoded(|encoded_bn| {
-            ONCHAIN_TX_KEY.clone().into_iter()
-                .chain(b"/".into_iter())
-                .chain(encoded_bn)
-                .chain(b"/".into_iter())
-                .chain(account_id.encode().as_slice().into_iter())
-                .copied()
-                .collect::<Vec<u8>>()
-        })
+            // Display error if the signed tx fails.
+            if let Some((acc, res)) = result {
+                if res.is_err() {
+                    log::error!("failure: offchain_signed_tx, tx sent: {:?}", acc.id);
+                    return Err(<Error<T>>::OffchainSignedTxError);
+                }
+                // Transaction is sent successfully
+                Ok(())
+            } else {
+                // The case result == `None`: no account is available for sending
+                log::error!("No local account available");
+                Err(<Error<T>>::NoLocalAcctForSigning)
+            }
+        }
+
+        /// 验证三要素匹配
+        fn validate_info(id_number: &Vec<u8>, name: &Vec<u8>, phone: &Vec<u8>) -> Result<i32, http::Error> {
+            // return Ok(1);
+            // 14272419960206331X, %E7%B1%8D%E8%A7%82%E9%80%9A, 18652030106
+            let deadline = sp_io::offchain::timestamp().add(Duration::from_millis(2_000));
+            let mut params = Vec::new();
+            params.push("idcard=".as_bytes());
+            params.push(&id_number);
+            params.push("&mobile=".as_bytes());
+            params.push(&phone);
+            params.push("&name=".as_bytes());
+            params.push(&name);
+            let request =
+                http::Request::post("http://sjsys.market.alicloudapi.com/communication/personal/1979",
+                                    params);
+            let pending = request
+                .add_header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+                .add_header("Authorization", "APPCODE ae1e3033a5de4969a3239250096c9cae")
+                .deadline(deadline).send().map_err(|_| http::Error::IoError)?;
+
+            let response = pending.try_wait(deadline).map_err(|_| http::Error::DeadlineReached)??;
+            if response.code != 200 {
+                log::warn!("Unexpected status code: {}", response.code);
+            }
+
+            let body = response.body().collect::<Vec<u8>>();
+            log::info!("body: {}", Self::v8_str(&body));
+            let body_str = sp_std::str::from_utf8(&body).map_err(|_| {
+                log::warn!("No UTF8 body");
+                http::Error::Unknown
+            })?;
+            let state_val = Self::parse_state(body_str);
+            return if let Some(state) = state_val.as_str() {
+                log::info!("{}", state);
+                Ok(str::parse::<i32>(state).unwrap())
+            } else {
+                log::error!("api error");
+                Ok(-1)
+            };
+        }
+
+        fn build_age_merkle(birth: &[u8]) -> MerkleTree {
+            let mut data = Vec::new();
+            // 构建范围数据，前后一百年 1900-2100
+            for year in 1900..=2100 {
+                let to_add_data = Self::format_u8_data(birth, year);
+                data.push(to_add_data);
+            }
+            MerkleTree::build(&data)
+        }
+
+        /// 四位数字转为Vec<u8>
+        fn format_u8_data(birth: &[u8], year: u32) -> Vec<u8> {
+            // year 转 u8
+            let mut year_u8 = Vec::new();
+            year_u8.push((year / 1000 + 48) as u8);
+            year_u8.push(((year % 1000) / 100 + 48) as u8);
+            year_u8.push(((year % 100) / 10 + 48) as u8);
+            year_u8.push(((year % 10) / 1 + 48) as u8);
+            // 组装格式 year:birthed
+            let mut data: Vec<u8> = Vec::new();
+            data.append(&mut year_u8.clone());
+            data.push(58);
+            if year_u8 >= birth.to_vec() {
+                data.push(49);
+            } else {
+                data.push(48);
+            }
+            data
+        }
+
+        fn append_key(block_number: T::BlockNumber, key: Vec<u8>) {
+            <BlockKeys<T>>::mutate(block_number, |keys| {
+                keys.push_back(key);
+                log::info!("\nBlock keys: {:?}, block_number: {:?}\n", keys, block_number);
+            });
+        }
+
+        /// 从校验api中解析验证结果
+        fn parse_state(resp_str: &str) -> Value {
+            let mut json_data: Value = serde_json::from_str(resp_str).unwrap();
+            json_data["data"]["state"].take()
+        }
+        fn v8_str(vec: &Vec<u8>) -> &str {
+            sp_std::str::from_utf8(vec).unwrap()
+        }
+
+        /// 生成key
+        fn derived_key(block_number: T::BlockNumber, account_id: T::AccountId) -> Vec<u8> {
+            block_number.using_encoded(|encoded_bn| {
+                ONCHAIN_TX_KEY.clone().into_iter()
+                    .chain(b"/".into_iter())
+                    .chain(encoded_bn)
+                    .chain(b"/".into_iter())
+                    .chain(account_id.encode().as_slice().into_iter())
+                    .copied()
+                    .collect::<Vec<u8>>()
+            })
+        }
     }
 }

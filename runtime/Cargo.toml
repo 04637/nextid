@@ -14,7 +14,7 @@ targets = ['x86_64-unknown-linux-gnu']
 
 [dependencies.pallet-ocw]
 default-features = false
-path = '../../pallets/ocw'
+path = '../pallets/ocw'
 version = '4.0.0-dev'
 
 [build-dependencies.substrate-wasm-builder]
